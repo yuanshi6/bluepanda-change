@@ -1,0 +1,16 @@
+[package]
+name = "bluepanda-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bluepanda-core = { path = "../core" }
+eframe.workspace = true
+rfd.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+fastnbt.workspace = true
+flate2.workspace = true
+ttf-parser = "0.25"

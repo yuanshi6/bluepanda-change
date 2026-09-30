@@ -1,0 +1,7 @@
+/target/
+/dist/
+/.validation/
+/real-sample-output-v7/
+__pycache__/
+*.py[cod]
+.DS_Store

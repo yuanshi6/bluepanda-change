@@ -1,0 +1,12 @@
+[package]
+name = "bluepanda-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+fastnbt.workspace = true
+flate2.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tempfile = "3"
