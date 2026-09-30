@@ -5,7 +5,9 @@ pub mod types;
 pub mod writer;
 
 pub use files::{convert_batch, convert_file};
-pub use parser::{decode_all_palette_indices, decode_palette_index, parse_litematic};
+pub use parser::{
+    decode_all_palette_indices, decode_palette_index, parse_litematic, parse_schem, parse_schematic,
+};
 pub use transform::{
     build_structure, build_structure_with_warnings, Structure, StructureBlock, StructureEntity,
     TransformOutput,

@@ -19,7 +19,7 @@ fn emit(input: &Path, stage: Stage, progress: &mut impl FnMut(ProgressEvent)) {
     });
 }
 
-/// Convert a single Litematica file to a verified, compressed Structure NBT file.
+/// Convert a Litematica or Sponge schematic to a verified, compressed Structure NBT file.
 pub fn convert_file(
     input: &Path,
     output: &Path,
@@ -31,7 +31,7 @@ pub fn convert_file(
         .map_err(|e| ConversionError::new(Stage::Read, format!("cannot open input: {e}")))?;
     emit(input, Stage::Decompress, &mut progress);
     emit(input, Stage::Parse, &mut progress);
-    let parsed = crate::parse_litematic(source)?;
+    let parsed = crate::parse_schematic(source)?;
 
     emit(input, Stage::Decode, &mut progress);
     let transformed = build_structure_with_warnings(&parsed)?;

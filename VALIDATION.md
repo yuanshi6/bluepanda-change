@@ -4,13 +4,25 @@ Validated on macOS with Rust `1.96.0` on 2026-09-30. Synthetic, hand-authored, a
 
 ## Automated checks
 
-- `cargo test --workspace` — passed, 35 tests: parser 11, file conversion 6, transform and writer 14, GUI worker/font 4. The file tests include Unicode filenames/output paths, a manually calculated asymmetric `2×2×3` layout, duplicate source de-duplication, same-name output collision failure even with overwrite, existing target preservation, overwrite after verification, and a corrupt file mixed with successful files.
-- GUI unit tests start a real background batch containing one valid and one damaged file, verify input-to-row result matching and queue lock/recovery, test no-input/no-output start guards, exercise reordered worker result delivery, and parse the embedded font while checking common Chinese UI glyphs.
-- `cargo build --workspace --release` — passed. The macOS packaging script also invokes this workspace release build.
-- `cargo fmt --all -- --check` — passed.
-- `scripts/build-macos.sh` — passed; produced `target/release/bluepanda-change` and `dist/BluePandaChange.app`. `plutil -lint dist/BluePandaChange.app/Contents/Info.plist` — passed.
+The previously completed checks in this section describe the baseline commit below; they are historical results, not post-Sponge-change verification.
+
+- Baseline commit `f6814861a908d7094f180499b7ec373f4b81e491` — `cargo test --workspace` passed, 35 tests: parser 11, file conversion 6, transform and writer 14, GUI worker/font 4. The file tests include Unicode filenames/output paths, a manually calculated asymmetric `2×2×3` layout, duplicate source de-duplication, same-name output collision failure even with overwrite, existing target preservation, overwrite after verification, and a corrupt file mixed with successful files.
+- Baseline GUI unit tests started a real background batch containing one valid and one damaged file, verified input-to-row result matching and queue lock/recovery, tested no-input/no-output start guards, exercised reordered worker result delivery, and parsed the embedded font while checking common Chinese UI glyphs.
+- Post-change `cargo test --workspace` — passed, 57 tests: core parser 20, file conversion 6, Sponge integration 12, transform 14, GUI 5. The GUI tests include a mixed `.litematic`/`.schem` queue test.
+- Post-change `cargo fmt --all -- --check` and `git diff --check` — passed.
+- Post-change `scripts/build-macos.sh` — passed and produced `target/release/bluepanda-change` and `dist/BluePandaChange.app`. `plutil -lint dist/BluePandaChange.app/Contents/Info.plist` — passed. The release GUI executable and app-bundle binary both have SHA-256 `c28c089bbb4a12723932058070fdb3442bb8111aaafede190207601234f55ae1`.
 - `cargo check --workspace` — passed.
 - CLI exit behavior — `--help` returned `0`; invocation with no required inputs returned `2`; a batch with one valid fixture and one missing file returned `1` after creating the valid file's output.
+
+## Sponge schematic coverage
+
+Synthetic hand-authored fixtures cover Sponge V1, V2, and V3. One real Sponge sample was independently converted and decoded; no other real `.schem` samples were validated.
+
+### Real sample: Datacenter.schem
+
+Source: `/Users/yuanshi/Downloads/Datacenter.schem`, SHA-256 `d8f587a570f2210acc285c7de3645972696b3727b427a7326f716850cb015369`. The file is Sponge V2 with `DataVersion=3465`, dimensions `73×36×73` (191,844 entries), a 101-entry palette, 24,421 non-air blocks, one block entity, and no entities. Its `Metadata` omission warning was emitted; `Offset` was `[0, 0, 0]`, and it contained no biome data.
+
+The release CLI wrote `.validation/schem-real/Datacenter.schem.nbt` with dimensions unchanged, a 100-entry output palette, 24,421 blocks, and zero entities. Its SHA-256 is `b512eee3933340977a2b70104d628b38af605e83065681925f04f5b7199304e9`. The independent standard-library NBT/VarInt verifier at `.validation/schem-real/validate_datacenter.py` compared every block's coordinate and state and the single block entity's typed payload; all comparisons passed.
 
 ## Release CLI pressure samples
 

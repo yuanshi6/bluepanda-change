@@ -98,7 +98,7 @@ pub fn build_structure_with_warnings(
     // Per-region packed arrays remain compact; only occupied voxel coordinates are materialized.
     let mut voxels: HashMap<[i64; 3], Voxel> = HashMap::new();
     let mut processed: Vec<(&Region, [i64; 3], [i64; 3], HashMap<[i64; 3], NbtValue>)> = Vec::new();
-    let mut warnings = parsed.warnings.clone();
+    let warnings = parsed.warnings.clone();
     let mut entity_by_uuid: HashMap<String, ([i64; 3], NbtValue)> = HashMap::new();
     let mut entities: Vec<([i64; 3], [f64; 3], Option<[i32; 3]>, NbtValue)> = Vec::new();
     for (r, (min, max, dims)) in regions.into_iter().zip(region_bounds.iter()) {
@@ -305,9 +305,6 @@ pub fn build_structure_with_warnings(
             nbt: data,
         });
     }
-    warnings.push(ConversionWarning::new(
-        "Litematica region names are not represented in Structure NBT",
-    ));
     Ok(TransformOutput {
         structure: Structure {
             size: out_size,

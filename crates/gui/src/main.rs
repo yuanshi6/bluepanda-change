@@ -4,6 +4,8 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
+const BLUEPRINT_FILE_EXTENSIONS: &[&str] = &["litematic", "schem"];
+
 #[derive(Clone, Debug)]
 enum RowState {
     Waiting,
@@ -181,7 +183,7 @@ impl eframe::App for BluePandaApp {
         }
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("BluePandaChange 蓝图转换");
-            ui.label("将 .litematic 文件转换为 Structure .nbt");
+            ui.label("将 .litematic / .schem 文件转换为 Structure .nbt");
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 if ui
@@ -189,7 +191,7 @@ impl eframe::App for BluePandaApp {
                     .clicked()
                 {
                     if let Some(paths) = rfd::FileDialog::new()
-                        .add_filter("Litematica 蓝图", &["litematic"])
+                        .add_filter("蓝图文件", BLUEPRINT_FILE_EXTENSIONS)
                         .pick_files()
                     {
                         self.add_paths(paths);
@@ -457,6 +459,21 @@ mod tests {
         assert!(
             matches!(&app.rows[1].state, RowState::Failed(message) if message == "broken input")
         );
+    }
+
+    #[test]
+    fn picker_filter_extensions_can_be_queued_together() {
+        let (_tx, rx) = mpsc::channel();
+        let mut app = app_with_receiver(rx);
+        let litematic = PathBuf::from("庭院.litematic");
+        let sponge = PathBuf::from("城堡.schem");
+
+        assert_eq!(BLUEPRINT_FILE_EXTENSIONS, &["litematic", "schem"]);
+        assert!(app.add_paths([litematic.clone(), sponge.clone()]));
+
+        assert_eq!(app.rows.len(), 2);
+        assert_eq!(app.rows[0].path, litematic);
+        assert_eq!(app.rows[1].path, sponge);
     }
 
     #[test]

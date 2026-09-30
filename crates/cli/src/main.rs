@@ -6,16 +6,17 @@ use std::path::PathBuf;
 #[command(
     name = "bluepanda-change",
     version,
-    about = "将 Litematica 蓝图转换为 Minecraft Structure NBT"
+    about = "将 Litematica 或 Sponge 蓝图转换为 Minecraft Structure NBT",
+    long_about = "批量将 Litematica（.litematic）或 Sponge（.schem）蓝图转换为压缩的 Minecraft Structure NBT 文件。输出文件名为输入文件名后追加 .nbt；单个文件失败不会中断后续转换。"
 )]
 struct Args {
-    /// 一个或多个 .litematic 文件
+    /// 一个或多个 .litematic 或 .schem 蓝图文件
     #[arg(required = true, value_name = "INPUT")]
     inputs: Vec<PathBuf>,
-    /// 输出目录
+    /// 保存转换结果的目录；输出名为原文件名后追加 .nbt
     #[arg(long, value_name = "DIR")]
     output_dir: PathBuf,
-    /// 覆盖已存在的输出文件
+    /// 允许覆盖已存在的输出文件（默认保留原文件并报告失败）
     #[arg(long)]
     overwrite: bool,
 }
