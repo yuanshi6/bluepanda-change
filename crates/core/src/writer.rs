@@ -21,9 +21,17 @@ pub fn write_structure<W: Write>(writer: W, structure: &Structure) -> Result<(),
 
 /// Read the just-written GZIP NBT and check its Structure shape and semantic payload.
 pub fn verify_structure<R: Read>(reader: R, expected: &Structure) -> Result<(), ConversionError> {
+    verify_structure_with_progress(reader, expected, |_, _| {})
+}
+
+pub(crate) fn verify_structure_with_progress<R: Read>(
+    reader: R,
+    expected: &Structure,
+    mut progress: impl FnMut(usize, usize),
+) -> Result<(), ConversionError> {
     let decoded: Structure = read_gzip_nbt(reader)?;
-    validate_structure(&decoded)?;
-    validate_structure(expected)?;
+    validate_structure_at(&decoded, Stage::Verify)?;
+    validate_structure_at(expected, Stage::Verify)?;
     if decoded.size != expected.size {
         return Err(ConversionError::new(
             Stage::Verify,
@@ -50,48 +58,55 @@ pub fn verify_structure<R: Read>(reader: R, expected: &Structure) -> Result<(), 
             "DataVersion did not survive NBT round-trip",
         ));
     }
-    if decoded
-        .blocks
-        .iter()
-        .zip(&expected.blocks)
-        .any(|(a, b)| a.pos != b.pos || a.state != b.state || a.nbt != b.nbt)
-    {
-        return Err(ConversionError::new(
-            Stage::Verify,
-            "Structure block records did not survive NBT round-trip",
-        ));
+    let total = decoded.blocks.len() + decoded.entities.len();
+    let mut completed = 0usize;
+    for (a, b) in decoded.blocks.iter().zip(&expected.blocks) {
+        if a.pos != b.pos || a.state != b.state || a.nbt != b.nbt {
+            return Err(ConversionError::new(
+                Stage::Verify,
+                "Structure block records did not survive NBT round-trip",
+            ));
+        }
+        completed += 1;
+        if completed % 16_384 == 0 || completed == total {
+            progress(completed, total.max(1));
+        }
     }
-    if decoded
-        .entities
-        .iter()
-        .zip(&expected.entities)
-        .any(|(a, b)| a.pos != b.pos || a.block_pos != b.block_pos || a.nbt != b.nbt)
-    {
-        return Err(ConversionError::new(
-            Stage::Verify,
-            "Structure entity records did not survive NBT round-trip",
-        ));
+    for (a, b) in decoded.entities.iter().zip(&expected.entities) {
+        if a.pos != b.pos || a.block_pos != b.block_pos || a.nbt != b.nbt {
+            return Err(ConversionError::new(
+                Stage::Verify,
+                "Structure entity records did not survive NBT round-trip",
+            ));
+        }
+        completed += 1;
+        if completed % 16_384 == 0 || completed == total {
+            progress(completed, total.max(1));
+        }
+    }
+    if total == 0 {
+        progress(0, 1);
     }
     Ok(())
 }
 
-fn validate_structure(structure: &Structure) -> Result<(), ConversionError> {
+pub(crate) fn validate_structure_at(
+    structure: &Structure,
+    stage: Stage,
+) -> Result<(), ConversionError> {
     if structure.palette.is_empty() {
-        return Err(ConversionError::new(
-            Stage::Verify,
-            "Structure palette is empty",
-        ));
+        return Err(ConversionError::new(stage, "Structure palette is empty"));
     }
     if structure.size.iter().any(|v| *v <= 0) {
         return Err(ConversionError::new(
-            Stage::Verify,
+            stage,
             "Structure dimensions must be positive",
         ));
     }
     for block in &structure.blocks {
         if block.state < 0 || block.state as usize >= structure.palette.len() {
             return Err(ConversionError::new(
-                Stage::Verify,
+                stage,
                 "block references an invalid palette index",
             ));
         }
@@ -101,6 +116,14 @@ fn validate_structure(structure: &Structure) -> Result<(), ConversionError> {
                 "block position is outside Structure dimensions",
             )
             .at(block.pos));
+        }
+    }
+    for entity in &structure.entities {
+        if entity.pos.iter().any(|v| !v.is_finite()) {
+            return Err(ConversionError::new(
+                stage,
+                "Structure entity position must be finite",
+            ));
         }
     }
     Ok(())

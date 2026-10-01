@@ -5,26 +5,156 @@ use fastnbt::Value;
 use flate2::bufread::GzDecoder;
 
 use crate::types::{
-    BlockState, ConversionError, ConversionWarning, NbtValue, ParsedSchematic, Region, Stage,
+    BlockState, CancellationToken, ConversionError, ConversionWarning, NbtValue, ParsedSchematic,
+    Region, Stage,
 };
+
+pub(crate) const PREVIEW_MAX_SOURCE_CELLS: usize = 16_777_216;
+
+struct ParseControl<'a> {
+    max_cells: Option<usize>,
+    decoded_cells: usize,
+    cancel: Option<&'a CancellationToken>,
+    progress: Option<&'a mut dyn FnMut(usize, usize)>,
+    warning: Option<&'a mut dyn FnMut(ConversionWarning)>,
+}
+
+fn push_warning(
+    control: &mut ParseControl<'_>,
+    warnings: &mut Vec<ConversionWarning>,
+    warning: ConversionWarning,
+) {
+    if let Some(callback) = control.warning.as_deref_mut() {
+        callback(warning.clone());
+    }
+    warnings.push(warning);
+}
+
+impl ParseControl<'_> {
+    fn check_cancelled(&self) -> Result<(), ConversionError> {
+        if self.cancel.is_some_and(CancellationToken::is_cancelled) {
+            Err(ConversionError::new(Stage::Cancelled, "preview cancelled"))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn account_cells(&mut self, cells: usize) -> Result<(), ConversionError> {
+        self.decoded_cells = self.decoded_cells.checked_add(cells).ok_or_else(|| {
+            ConversionError::new(Stage::Preview, "preview source cell count overflow")
+        })?;
+        if let Some(limit) = self.max_cells {
+            if self.decoded_cells > limit {
+                return Err(ConversionError::new(
+                    Stage::Preview,
+                    format!("preview source cell limit exceeded ({limit})"),
+                ));
+            }
+        }
+        self.check_cancelled()
+    }
+}
 
 /// Decompress and parse a supported legacy Litematica 6.1 or 7.1 schematic.
 /// The input must be GZIP-compressed NBT as produced by Litematica.
 pub fn parse_litematic<R: Read>(reader: R) -> Result<ParsedSchematic, ConversionError> {
     let root = read_gzip_nbt_value(reader)?;
-    parse_litematic_value(&root)
+    parse_litematic_value(
+        &root,
+        &mut ParseControl {
+            max_cells: None,
+            decoded_cells: 0,
+            cancel: None,
+            progress: None,
+            warning: None,
+        },
+    )
 }
 
 /// Parse a GZIP-compressed Litematica or Sponge schematic by its NBT layout.
 pub fn parse_schematic<R: Read>(reader: R) -> Result<ParsedSchematic, ConversionError> {
     let root = read_gzip_nbt_value(reader)?;
+    parse_schematic_value(&root)
+}
+
+/// Parse a conversion input while forwarding decoded-cell progress and warnings as they occur.
+pub(crate) fn parse_schematic_with_events<R: Read>(
+    reader: R,
+    mut progress: impl FnMut(usize, usize),
+    mut warning: impl FnMut(ConversionWarning),
+) -> Result<ParsedSchematic, ConversionError> {
+    let root = read_gzip_nbt_value(reader)?;
+    let mut control = ParseControl {
+        max_cells: None,
+        decoded_cells: 0,
+        cancel: None,
+        progress: Some(&mut progress),
+        warning: Some(&mut warning),
+    };
+    parse_schematic_value_with_control(&root, &mut control)
+}
+
+pub(crate) fn parse_schematic_value_preview(
+    root: &Value,
+    cancel: &CancellationToken,
+    progress: &mut impl FnMut(usize, usize),
+) -> Result<(ParsedSchematic, crate::types::PreviewFormat), ConversionError> {
     let root_compound = compound(&root, "root", Stage::Validate)?;
+    let mut control = ParseControl {
+        max_cells: Some(PREVIEW_MAX_SOURCE_CELLS),
+        decoded_cells: 0,
+        cancel: Some(cancel),
+        progress: Some(progress),
+        warning: None,
+    };
     if root_compound.contains_key("Schematic") {
-        parse_schem_value(&root)
+        Ok((
+            parse_schem_value(&root, &mut control)?,
+            crate::types::PreviewFormat::SpongeV3,
+        ))
     } else if root_compound.contains_key("Regions") {
-        parse_litematic_value(&root)
+        Ok((
+            parse_litematic_value(&root, &mut control)?,
+            crate::types::PreviewFormat::Litematica,
+        ))
     } else if root_compound.contains_key("Version") {
-        parse_schem_value(&root)
+        let version = int_field(root_compound, "Version", "root", Stage::Validate)?;
+        let format = if matches!(version, 1 | 2) {
+            crate::types::PreviewFormat::SpongeV1V2
+        } else {
+            crate::types::PreviewFormat::SpongeV1V2
+        };
+        Ok((parse_schem_value(&root, &mut control)?, format))
+    } else {
+        Err(ConversionError::new(
+            Stage::Validate,
+            "unrecognized schematic NBT layout",
+        ))
+    }
+}
+
+fn parse_schematic_value(root: &Value) -> Result<ParsedSchematic, ConversionError> {
+    let mut control = ParseControl {
+        max_cells: None,
+        decoded_cells: 0,
+        cancel: None,
+        progress: None,
+        warning: None,
+    };
+    parse_schematic_value_with_control(root, &mut control)
+}
+
+fn parse_schematic_value_with_control(
+    root: &Value,
+    control: &mut ParseControl<'_>,
+) -> Result<ParsedSchematic, ConversionError> {
+    let root_compound = compound(root, "root", Stage::Validate)?;
+    if root_compound.contains_key("Schematic") {
+        parse_schem_value(root, control)
+    } else if root_compound.contains_key("Regions") {
+        parse_litematic_value(root, control)
+    } else if root_compound.contains_key("Version") {
+        parse_schem_value(root, control)
     } else {
         Err(ConversionError::new(
             Stage::Validate,
@@ -36,7 +166,16 @@ pub fn parse_schematic<R: Read>(reader: R) -> Result<ParsedSchematic, Conversion
 /// Parse a GZIP-compressed Sponge schematic (specification versions 1, 2, or 3).
 pub fn parse_schem<R: Read>(reader: R) -> Result<ParsedSchematic, ConversionError> {
     let root = read_gzip_nbt_value(reader)?;
-    parse_schem_value(&root)
+    parse_schem_value(
+        &root,
+        &mut ParseControl {
+            max_cells: None,
+            decoded_cells: 0,
+            cancel: None,
+            progress: None,
+            warning: None,
+        },
+    )
 }
 
 fn read_gzip_nbt_value<R: Read>(reader: R) -> Result<Value, ConversionError> {
@@ -74,7 +213,10 @@ fn read_gzip_nbt_value<R: Read>(reader: R) -> Result<Value, ConversionError> {
     Ok(root)
 }
 
-fn parse_litematic_value(root: &Value) -> Result<ParsedSchematic, ConversionError> {
+fn parse_litematic_value(
+    root: &Value,
+    control: &mut ParseControl<'_>,
+) -> Result<ParsedSchematic, ConversionError> {
     let root = compound(&root, "root", Stage::Validate)?;
     let version = int_field(root, "Version", "root", Stage::Validate)?;
     let sub_version = int_field(root, "SubVersion", "root", Stage::Validate)?;
@@ -104,21 +246,32 @@ fn parse_litematic_value(root: &Value) -> Result<ParsedSchematic, ConversionErro
     let mut regions = Vec::with_capacity(regions_compound.len());
     let mut warnings = Vec::new();
     if root.contains_key("Metadata") {
-        warnings.push(ConversionWarning::new(
-            "Litematica metadata is not represented in Minecraft Structure NBT",
-        ));
+        push_warning(
+            control,
+            &mut warnings,
+            ConversionWarning::new(
+                "Litematica metadata is not represented in Minecraft Structure NBT",
+            ),
+        );
     }
-    warnings.push(ConversionWarning::new(
-        "Litematica region names are not represented in Minecraft Structure NBT",
-    ));
+    push_warning(
+        control,
+        &mut warnings,
+        ConversionWarning::new(
+            "Litematica region names are not represented in Minecraft Structure NBT",
+        ),
+    );
     // NBT compounds have no semantic ordering. Sort names so merged palettes, diagnostics, and
     // output bytes are repeatable across runs despite HashMap iteration randomization.
     let mut ordered_regions: Vec<_> = regions_compound.iter().collect();
     ordered_regions.sort_by(|(left, _), (right, _)| left.cmp(right));
     for (name, value) in ordered_regions {
-        let region = parse_region(name, value)?;
+        control.check_cancelled()?;
+        let region = parse_region(name, value, control)?;
         if region_has_pending_ticks(value) {
-            warnings.push(
+            push_warning(
+                control,
+                &mut warnings,
                 ConversionWarning::new(
                     "pending block or fluid ticks are not represented in Minecraft Structure NBT",
                 )
@@ -138,7 +291,10 @@ fn parse_litematic_value(root: &Value) -> Result<ParsedSchematic, ConversionErro
 // special case so a tiny file cannot trigger billions of transform iterations.
 const MAX_EMPTY_SPONGE_CELLS: usize = 16_777_216;
 
-fn parse_schem_value(root: &Value) -> Result<ParsedSchematic, ConversionError> {
+fn parse_schem_value(
+    root: &Value,
+    control: &mut ParseControl<'_>,
+) -> Result<ParsedSchematic, ConversionError> {
     let root = compound(root, "root", Stage::Validate)?;
     if let Some(schematic) = root.get("Schematic") {
         let schematic = compound(schematic, "Schematic", Stage::Validate)?;
@@ -149,11 +305,11 @@ fn parse_schem_value(root: &Value) -> Result<ParsedSchematic, ConversionError> {
                 format!("nested Sponge Schematic supports Version=3, got {version}"),
             ));
         }
-        return parse_schem_v3(schematic);
+        return parse_schem_v3(schematic, control);
     }
     let version = int_field(root, "Version", "root", Stage::Validate)?;
     match version {
-        1 | 2 => parse_schem_v1_v2(root, version),
+        1 | 2 => parse_schem_v1_v2(root, version, control),
         other => Err(ConversionError::new(
             Stage::Validate,
             format!(
@@ -166,9 +322,11 @@ fn parse_schem_value(root: &Value) -> Result<ParsedSchematic, ConversionError> {
 fn parse_schem_v1_v2(
     root: &HashMap<String, Value>,
     version: i32,
+    control: &mut ParseControl<'_>,
 ) -> Result<ParsedSchematic, ConversionError> {
     let size = sponge_dimensions(root, "root")?;
     let volume = checked_sponge_volume(size)?;
+    control.account_cells(volume)?;
     let palette = root.get("Palette").ok_or_else(|| {
         ConversionError::new(
             Stage::Validate,
@@ -180,8 +338,8 @@ fn parse_schem_v1_v2(
         .ok_or_else(|| ConversionError::new(Stage::Validate, "missing BlockData byte array"))?;
     let (palette, remap, bits) = parse_sponge_palette(palette, "Palette")?;
     validate_palette_max(root, &remap)?;
-    let packed_states = decode_sponge_varints(block_data, volume, &remap, bits)?;
-    let mut warnings = sponge_warnings(root, version == 2)?;
+    let mut warnings = sponge_warnings(root, version == 2, control)?;
+    let packed_states = decode_sponge_varints(block_data, volume, &remap, bits, control)?;
     let block_entity_field = if version == 1 {
         "TileEntities"
     } else {
@@ -190,7 +348,7 @@ fn parse_schem_v1_v2(
     let (block_entities, stripped_content_version) =
         sponge_block_entities(root.get(block_entity_field), false, version == 1)?;
     if stripped_content_version {
-        warnings.push(ConversionWarning::new(
+        push_warning(control, &mut warnings, ConversionWarning::new(
             "Sponge V1 TileEntities ContentVersion wrappers are not represented in Minecraft Structure NBT",
         ));
     }
@@ -210,9 +368,21 @@ fn parse_schem_v1_v2(
     })
 }
 
-fn parse_schem_v3(schematic: &HashMap<String, Value>) -> Result<ParsedSchematic, ConversionError> {
+fn parse_schem_v3(
+    schematic: &HashMap<String, Value>,
+    control: &mut ParseControl<'_>,
+) -> Result<ParsedSchematic, ConversionError> {
     let size = sponge_dimensions(schematic, "Schematic")?;
     let volume = checked_sponge_volume(size)?;
+    control.account_cells(volume)?;
+    let mut warnings = sponge_warnings(schematic, true, control)?;
+    if schematic.contains_key("Biomes") {
+        push_warning(
+            control,
+            &mut warnings,
+            ConversionWarning::new("Sponge biomes are not represented in Minecraft Structure NBT"),
+        );
+    }
     let (palette, packed_states, block_entities) = match schematic.get("Blocks") {
         None => {
             if volume > MAX_EMPTY_SPONGE_CELLS {
@@ -246,17 +416,11 @@ fn parse_schem_v3(schematic: &HashMap<String, Value>) -> Result<ParsedSchematic,
                 ConversionError::new(Stage::Validate, "Blocks is missing Data byte array")
             })?;
             let (palette, remap, bits) = parse_sponge_palette(palette_value, "Blocks.Palette")?;
-            let packed = decode_sponge_varints(data, volume, &remap, bits)?;
+            let packed = decode_sponge_varints(data, volume, &remap, bits, control)?;
             let (entities, _) = sponge_block_entities(blocks.get("BlockEntities"), true, false)?;
             (palette, packed, entities)
         }
     };
-    let mut warnings = sponge_warnings(schematic, true)?;
-    if schematic.contains_key("Biomes") {
-        warnings.push(ConversionWarning::new(
-            "Sponge biomes are not represented in Minecraft Structure NBT",
-        ));
-    }
     let entities = sponge_entities(schematic.get("Entities"), true)?;
     Ok(ParsedSchematic {
         data_version: sponge_data_version(schematic, false)?,
@@ -507,6 +671,7 @@ fn decode_sponge_varints(
     volume: usize,
     remap: &HashMap<u32, usize>,
     bits: usize,
+    control: &mut ParseControl<'_>,
 ) -> Result<Vec<i64>, ConversionError> {
     let bytes = match value {
         Value::ByteArray(bytes) => bytes,
@@ -547,6 +712,12 @@ fn decode_sponge_varints(
     words.resize(word_count, 0u64);
     let mut cursor = 0usize;
     for index in 0..volume {
+        if index % 16_384 == 0 {
+            control.check_cancelled()?;
+            if let Some(callback) = control.progress.as_deref_mut() {
+                callback(index, volume);
+            }
+        }
         let palette_id = read_sponge_varint(bytes, &mut cursor)?;
         let mapped = remap.get(&palette_id).copied().ok_or_else(|| {
             ConversionError::new(
@@ -567,6 +738,9 @@ fn decode_sponge_varints(
             Stage::Validate,
             format!("BlockData contains extra bytes after {volume} entries"),
         ));
+    }
+    if let Some(callback) = control.progress.as_deref_mut() {
+        callback(volume, volume.max(1));
     }
     Ok(words.into_iter().map(|word| word as i64).collect())
 }
@@ -821,27 +995,38 @@ fn merge_sponge_data(
 fn sponge_warnings(
     schematic: &HashMap<String, Value>,
     include_biomes: bool,
+    control: &mut ParseControl<'_>,
 ) -> Result<Vec<ConversionWarning>, ConversionError> {
     let mut warnings = Vec::new();
     if schematic.contains_key("Metadata") {
-        warnings.push(ConversionWarning::new(
-            "Sponge schematic metadata is not represented in Minecraft Structure NBT",
-        ));
+        push_warning(
+            control,
+            &mut warnings,
+            ConversionWarning::new(
+                "Sponge schematic metadata is not represented in Minecraft Structure NBT",
+            ),
+        );
     }
     if include_biomes
         && (schematic.contains_key("BiomePalette") || schematic.contains_key("BiomeData"))
     {
-        warnings.push(ConversionWarning::new(
-            "Sponge biomes are not represented in Minecraft Structure NBT",
-        ));
+        push_warning(
+            control,
+            &mut warnings,
+            ConversionWarning::new("Sponge biomes are not represented in Minecraft Structure NBT"),
+        );
     }
     if let Some(offset) = schematic.get("Offset") {
         match offset {
             Value::IntArray(values) if values.len() == 3 => {
                 if values.iter().any(|value| *value != 0) {
-                    warnings.push(ConversionWarning::new(
-                        "non-zero Sponge Offset is not applied to the normalized structure",
-                    ));
+                    push_warning(
+                        control,
+                        &mut warnings,
+                        ConversionWarning::new(
+                            "non-zero Sponge Offset is not applied to the normalized structure",
+                        ),
+                    );
                 }
             }
             other => {
@@ -858,7 +1043,11 @@ fn sponge_warnings(
     Ok(warnings)
 }
 
-fn parse_region(name: &str, value: &Value) -> Result<Region, ConversionError> {
+fn parse_region(
+    name: &str,
+    value: &Value,
+    control: &mut ParseControl<'_>,
+) -> Result<Region, ConversionError> {
     let c = compound(value, "region", Stage::Validate).map_err(|e| e.in_region(name))?;
     let position = vec3_field(c, "Position", name)?;
     let size = vec3_field(c, "Size", name)?;
@@ -942,6 +1131,9 @@ fn parse_region(name: &str, value: &Value) -> Result<Region, ConversionError> {
         ConversionError::new(Stage::Validate, "region volume overflows addressable size")
             .in_region(name)
     })?;
+    control
+        .account_cells(volume)
+        .map_err(|error| error.in_region(name))?;
     let bits = bits_per_block(palette.len());
     let expected_longs = volume
         .checked_mul(bits)
@@ -979,6 +1171,14 @@ fn parse_region(name: &str, value: &Value) -> Result<Region, ConversionError> {
         entities: optional_compound_list(c, "Entities", name)?,
     };
     for index in 0..volume {
+        if index % 16_384 == 0 {
+            control
+                .check_cancelled()
+                .map_err(|error| error.in_region(name))?;
+            if let Some(progress) = control.progress.as_deref_mut() {
+                progress(index, volume);
+            }
+        }
         let palette_index = decode_palette_index(&region, index)?;
         if palette_index >= region.palette.len() {
             let pos = linear_index_to_xyz(index, size);
@@ -992,6 +1192,9 @@ fn parse_region(name: &str, value: &Value) -> Result<Region, ConversionError> {
             .in_region(name)
             .at(pos));
         }
+    }
+    if let Some(progress) = control.progress.as_deref_mut() {
+        progress(volume, volume.max(1));
     }
     Ok(region)
 }
@@ -1227,6 +1430,16 @@ mod tests {
     use super::*;
     use flate2::{write::GzEncoder, Compression};
     use std::{collections::HashMap, io::Write};
+
+    fn unlimited_control() -> ParseControl<'static> {
+        ParseControl {
+            max_cells: None,
+            decoded_cells: 0,
+            cancel: None,
+            progress: None,
+            warning: None,
+        }
+    }
 
     fn comp(entries: impl IntoIterator<Item = (String, Value)>) -> Value {
         Value::Compound(entries.into_iter().collect())
@@ -1903,6 +2116,7 @@ mod tests {
                 1,
                 &HashMap::from([(0, 0)]),
                 2,
+                &mut unlimited_control(),
             )
             .unwrap_err();
             assert_eq!(err.stage, Stage::Validate);
@@ -1912,6 +2126,7 @@ mod tests {
             1,
             &HashMap::from([(0, 0)]),
             2,
+            &mut unlimited_control(),
         )
         .unwrap_err();
         assert!(err.message.contains("missing palette index"));
@@ -1920,6 +2135,7 @@ mod tests {
             1,
             &HashMap::from([(0, 0)]),
             2,
+            &mut unlimited_control(),
         )
         .unwrap_err();
         assert!(err.message.contains("extra bytes"));
@@ -1929,6 +2145,7 @@ mod tests {
                 1,
                 &HashMap::from([(0, 0)]),
                 2,
+                &mut unlimited_control(),
             )
             .unwrap(),
             vec![0]
@@ -2015,6 +2232,7 @@ mod tests {
             values.len(),
             &remap,
             bits_per_block(values.len()),
+            &mut unlimited_control(),
         )
         .unwrap();
         let region = Region {

@@ -62,6 +62,13 @@ pub fn build_structure(parsed: &ParsedSchematic) -> Result<Structure, Conversion
 pub fn build_structure_with_warnings(
     parsed: &ParsedSchematic,
 ) -> Result<TransformOutput, ConversionError> {
+    build_structure_with_progress(parsed, |_, _| {})
+}
+
+pub(crate) fn build_structure_with_progress(
+    parsed: &ParsedSchematic,
+    mut progress: impl FnMut(usize, usize),
+) -> Result<TransformOutput, ConversionError> {
     if parsed.regions.is_empty() {
         return Err(ConversionError::new(
             Stage::Validate,
@@ -101,6 +108,16 @@ pub fn build_structure_with_warnings(
     let warnings = parsed.warnings.clone();
     let mut entity_by_uuid: HashMap<String, ([i64; 3], NbtValue)> = HashMap::new();
     let mut entities: Vec<([i64; 3], [f64; 3], Option<[i32; 3]>, NbtValue)> = Vec::new();
+    let total_cells = region_bounds
+        .iter()
+        .try_fold(0usize, |sum, (_, _, dims)| {
+            dims[0]
+                .checked_mul(dims[1])
+                .and_then(|value| value.checked_mul(dims[2]))
+                .and_then(|count| sum.checked_add(usize::try_from(count).ok()?))
+        })
+        .ok_or_else(|| ConversionError::new(Stage::Decode, "total region volume overflow"))?;
+    let mut completed_cells = 0usize;
     for (r, (min, max, dims)) in regions.into_iter().zip(region_bounds.iter()) {
         let count = dims[0]
             .checked_mul(dims[1])
@@ -142,6 +159,9 @@ pub fn build_structure_with_warnings(
             }
         }
         for i in 0..count {
+            if i % 16_384 == 0 {
+                progress(completed_cells.saturating_add(i), total_cells.max(1));
+            }
             let palette_index = crate::parser::decode_palette_index(r, i)?;
             let state = r
                 .palette
@@ -222,6 +242,8 @@ pub fn build_structure_with_warnings(
                 }
             }
         }
+        completed_cells = completed_cells.saturating_add(count);
+        progress(completed_cells, total_cells.max(1));
         if let Some(pos) = block_entities
             .keys()
             .find(|p| !used_block_entities.contains(*p))

@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Owned, typed NBT value. This preserves numeric and array tag kinds.
 pub type NbtValue = fastnbt::Value;
@@ -16,6 +18,76 @@ pub enum Stage {
     Write,
     Verify,
     Commit,
+    Preview,
+    Cancelled,
+    Internal,
+}
+
+/// Cloneable cancellation signal shared by the preview worker and UI.
+#[derive(Clone, Debug, Default)]
+pub struct CancellationToken(Arc<AtomicBool>);
+
+impl CancellationToken {
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreviewFormat {
+    Litematica,
+    SpongeV1V2,
+    SpongeV3,
+    JavaStructure,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviewDocument {
+    pub format: PreviewFormat,
+    /// Minimum source coordinate represented by document-relative block positions.
+    pub origin: [i64; 3],
+    pub size: [i32; 3],
+    /// Stable, deduplicated palette shared by all sparse preview blocks.
+    pub palette: Vec<BlockState>,
+    pub regions: Vec<PreviewRegion>,
+    pub blocks: Vec<PreviewBlock>,
+    pub entities_count: usize,
+    pub warnings: Vec<ConversionWarning>,
+}
+
+/// Preview metadata and every region's sparse block candidates for interactive visibility.
+/// `document.blocks` retains the merged, earlier-region-wins view used by existing callers;
+/// `region_blocks` additionally contains overlapping candidates in source region order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviewScene {
+    pub document: PreviewDocument,
+    pub data_version: Option<i32>,
+    pub block_entities_count: usize,
+    pub region_blocks: Vec<PreviewBlock>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviewRegion {
+    pub id: u32,
+    pub name: String,
+    pub source_origin: [i64; 3],
+    /// Region origin relative to PreviewDocument::origin.
+    pub position: [i32; 3],
+    pub size: [i32; 3],
+    pub block_count: usize,
+    pub entities_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviewBlock {
+    /// Position relative to PreviewDocument::origin.
+    pub position: [i32; 3],
+    pub state: u32,
+    pub region_id: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

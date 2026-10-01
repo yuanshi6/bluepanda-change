@@ -10,9 +10,10 @@ license = "MIT"
 [workspace.dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
-eframe = "0.31"
+eframe = { version = "0.31", features = ["persistence"] }
 fastnbt = "2"
 flate2 = "1"
+image = "0.25"
 rfd = "0.15"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
